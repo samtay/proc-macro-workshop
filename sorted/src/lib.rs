@@ -24,10 +24,10 @@ pub fn sorted(args: TokenStream, input: TokenStream) -> TokenStream {
 
 /// Convenience wrapper around all the logic so that we can propagate compiler errors via ? to the
 /// top level
-fn sorted_inner(item: Item) -> Result<proc_macro2::TokenStream> {
+fn sorted_inner(item: Item) -> Result<()> {
     let enumitem = parse_enum(item)?;
     ensure_sorted(enumitem.variants.iter().map(|v| &v.ident))?;
-    Ok(quote! {#enumitem})
+    Ok(())
 }
 
 /// Ensure `Item` is an enum
