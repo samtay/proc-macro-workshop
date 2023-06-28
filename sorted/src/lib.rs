@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display};
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -130,10 +130,10 @@ impl VisitMut for Check {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, a)| match &a.pat {
-                    syn::Pat::Path(p) => Some(Ok(p.path.clone())),
-                    syn::Pat::Struct(s) => Some(Ok(s.path.clone())),
-                    syn::Pat::TupleStruct(t) => Some(Ok(t.path.clone())),
-                    syn::Pat::Ident(i) => Some(Ok(i.ident.clone().into())),
+                    syn::Pat::Path(p) => Some(Ok(Cow::Borrowed(&p.path))),
+                    syn::Pat::Struct(s) => Some(Ok(Cow::Borrowed(&s.path))),
+                    syn::Pat::TupleStruct(t) => Some(Ok(Cow::Borrowed(&t.path))),
+                    syn::Pat::Ident(i) => Some(Ok(Cow::Owned(i.ident.clone().into()))),
                     syn::Pat::Wild(_) => (i != n - 1)
                         .then(|| Err(Error::new_spanned(&a.pat, "wildcard _ should be last"))),
                     _ => Some(Err(Error::new_spanned(&a.pat, "unsupported by #[sorted]"))),
@@ -149,7 +149,7 @@ impl VisitMut for Check {
     }
 }
 
-fn ensure_sorted_arms(paths: Vec<Path>) -> Result<()> {
+fn ensure_sorted_arms(paths: Vec<Cow<Path>>) -> Result<()> {
     ensure_sorted_by(paths.iter(), |p| {
         let mut s = quote!(#p).to_string();
         s.retain(|c| !c.is_whitespace());
