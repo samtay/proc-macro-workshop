@@ -1,8 +1,14 @@
+use std::fmt::Display;
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::quote;
-use syn::{parse_macro_input, spanned::Spanned, Error, Item, ItemEnum, Result, Variant};
+use quote::{quote, ToTokens};
+use syn::{
+    parse_macro_input, spanned::Spanned, visit_mut::VisitMut, Error, ExprMatch, Item, ItemEnum,
+    ItemFn, Path, Result,
+};
 
+/// An attribute for enums that enforces sorted variants
 #[proc_macro_attribute]
 pub fn sorted(args: TokenStream, input: TokenStream) -> TokenStream {
     let _ = args;
@@ -16,14 +22,15 @@ pub fn sorted(args: TokenStream, input: TokenStream) -> TokenStream {
     tokens
 }
 
-// Convenience wrapper around all the logic so that we can propagate compiler errors via ? to the
-// top level
+/// Convenience wrapper around all the logic so that we can propagate compiler errors via ? to the
+/// top level
 fn sorted_inner(item: Item) -> Result<proc_macro2::TokenStream> {
     let enumitem = parse_enum(item)?;
-    ensure_sorted(enumitem.variants.iter())?;
+    ensure_sorted(enumitem.variants.iter().map(|v| &v.ident))?;
     Ok(quote! {#enumitem})
 }
 
+/// Ensure `Item` is an enum
 fn parse_enum(item: Item) -> Result<ItemEnum> {
     match item {
         Item::Enum(e) => Ok(e),
@@ -35,22 +42,117 @@ fn parse_enum(item: Item) -> Result<ItemEnum> {
     }
 }
 
-fn ensure_sorted<'a>(variants: impl Iterator<Item = &'a Variant>) -> Result<()> {
-    let mut sorted_variants: Vec<&Variant> = vec![];
-    for variant in variants {
-        if let Some(prev) = &sorted_variants.last() {
-            if variant.ident < prev.ident {
-                for v in &sorted_variants {
-                    if variant.ident < v.ident {
-                        return Err(Error::new(
-                            variant.span(),
-                            format!("{} should sort before {}", variant.ident, v.ident),
-                        ));
-                    }
-                }
+/// Ensure spannable items are sorted (used for variant idents in enum declaration)
+fn ensure_sorted<'a, I, T: 'a>(elems: I) -> Result<()>
+where
+    I: Iterator<Item = &'a T>,
+    T: PartialOrd + ToTokens + Spanned + Display,
+{
+    ensure_sorted_by(elems, |e| e.to_string())
+}
+
+// N.B. ToTokens is required for `new_spanned`, which allows one to target the full path, e.g.
+// `Error::Fmt`. Using `Error::new(path.span(), ..)` only targets the first segment of the path.
+fn ensure_sorted_by<'a, I, T: 'a, F>(elems: I, f: F) -> Result<()>
+where
+    I: Iterator<Item = &'a T>,
+    T: Spanned + ToTokens,
+    F: Fn(&T) -> String,
+{
+    let mut sorted_elems: Vec<&T> = vec![];
+    for elem in elems {
+        for v in &sorted_elems {
+            if f(elem) < f(v) {
+                return Err(Error::new_spanned(
+                    elem,
+                    format!("{} should sort before {}", f(elem), f(v)),
+                ));
             }
         }
-        sorted_variants.push(variant);
+        sorted_elems.push(elem);
     }
     Ok(())
+}
+
+#[proc_macro_attribute]
+pub fn check(args: TokenStream, input: TokenStream) -> TokenStream {
+    let _ = args;
+    let mut item_fn = parse_macro_input!(input as ItemFn);
+    let mut check = Check::default();
+
+    // remove the `#[sorted]` attribute, and gather any sorting errors
+    check.visit_item_fn_mut(&mut item_fn);
+
+    // output tokens from the modified `item_fn`
+    let mut tokens = TokenStream::from(quote! {#item_fn});
+
+    // add a compiler error if present
+    if let Some(e) = check.err {
+        tokens.extend(TokenStream::from(Error::into_compile_error(e)))
+    }
+
+    tokens
+}
+
+#[derive(Default)]
+struct Check {
+    err: Option<Error>,
+}
+
+impl VisitMut for Check {
+    fn visit_expr_match_mut(&mut self, m: &mut ExprMatch) {
+        // By keeping `check_requested` outside of the visitor, we allow users to specify `#[sorted]`
+        // granularly, rather than forcing nested matches to all be sorted.
+        let mut check_requested = false;
+
+        // Detected sorted request and remove it
+        m.attrs.retain(|a| {
+            if a.path().is_ident("sorted") {
+                check_requested = true;
+                false
+            } else {
+                true
+            }
+        });
+
+        // For consistency's sake, go visit the other remaining attrs
+        for a in &mut m.attrs {
+            self.visit_attribute_mut(a);
+        }
+
+        self.visit_expr_mut(&mut *m.expr);
+
+        // Ensure arms are sorted
+        if check_requested {
+            let n = m.arms.len();
+            self.err = m
+                .arms
+                .iter()
+                .enumerate()
+                .filter_map(|(i, a)| match &a.pat {
+                    syn::Pat::Path(p) => Some(Ok(p.path.clone())),
+                    syn::Pat::Struct(s) => Some(Ok(s.path.clone())),
+                    syn::Pat::TupleStruct(t) => Some(Ok(t.path.clone())),
+                    syn::Pat::Ident(i) => Some(Ok(i.ident.clone().into())),
+                    syn::Pat::Wild(_) => (i != n - 1)
+                        .then(|| Err(Error::new_spanned(&a.pat, "wildcard _ should be last"))),
+                    _ => Some(Err(Error::new_spanned(&a.pat, "unsupported by #[sorted]"))),
+                })
+                .collect::<Result<_>>()
+                .and_then(ensure_sorted_arms)
+                .err();
+        }
+
+        for a in &mut m.arms {
+            self.visit_arm_mut(a);
+        }
+    }
+}
+
+fn ensure_sorted_arms(paths: Vec<Path>) -> Result<()> {
+    ensure_sorted_by(paths.iter(), |p| {
+        let mut s = quote!(#p).to_string();
+        s.retain(|c| !c.is_whitespace());
+        s
+    })
 }
