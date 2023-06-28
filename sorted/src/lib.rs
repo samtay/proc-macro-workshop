@@ -15,6 +15,8 @@ pub fn sorted(args: TokenStream, input: TokenStream) -> TokenStream {
     // Always return the given input stream
     let mut tokens = input.clone();
     let item = parse_macro_input!(input as Item);
+
+    // And add compiler errors if necessary
     if let Err(e) = sorted_inner(item) {
         tokens.extend(TokenStream::from(Error::into_compile_error(e)))
     }
@@ -101,8 +103,9 @@ struct Check {
 
 impl VisitMut for Check {
     fn visit_expr_match_mut(&mut self, m: &mut ExprMatch) {
-        // By keeping `check_requested` outside of the visitor, we allow users to specify `#[sorted]`
-        // granularly, rather than forcing nested matches to all be sorted.
+        // By keeping `check_requested` outside of the visitor, and defined per match expression,
+        // we allow users to specify `#[sorted]` granularly, rather than forcing nested matches to
+        // all be sorted.
         let mut check_requested = false;
 
         // Detected sorted request and remove it
