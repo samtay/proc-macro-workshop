@@ -41,4 +41,13 @@ fn main() {
     let sum = f0() + f1() + f2() + f3();
 
     assert_eq!(sum, 100 + 2 + 4 + 6);
+
+    // ST: suffix check
+    seq!(N in 1..4 {
+        fn f~N~_suffix () -> u64 {
+            N * 2
+        }
+    });
+    let sum = f1_suffix() + f2_suffix() + f3_suffix();
+    assert_eq!(sum, 2 + 4 + 6);
 }
