@@ -1,23 +1,20 @@
-use std::{fmt::Display, iter::Peekable};
+use std::{fmt::Display, iter::Peekable, ops::Range};
 
 use proc_macro::TokenStream;
-use proc_macro2::{Group, Literal, Span, TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{Delimiter, Group, Literal, Span, TokenStream as TokenStream2, TokenTree};
 use syn::{braced, parse::Parse, parse_macro_input, Error, Ident, LitInt, Result, Token};
 
 #[proc_macro]
 pub fn seq(input: TokenStream) -> TokenStream {
     let s = parse_macro_input!(input as Seq);
-    // std::fs::write("seq_struct.rs", format!("{s:?}")).unwrap();
     let tokens = s.output().unwrap_or_else(Error::into_compile_error);
-    std::fs::write("tokens.rs", format!("{tokens:?}")).unwrap();
     TokenStream::from(tokens)
 }
 
 #[derive(Debug)]
 struct Seq {
     ident: Ident,
-    start: u16,
-    end: u16,
+    range: Range<u16>,
     content: TokenStream2,
 }
 
@@ -28,13 +25,17 @@ impl Parse for Seq {
         input.parse::<Token![in]>()?;
         let start = input.parse::<LitInt>()?.base10_parse::<u16>()?;
         input.parse::<Token![..]>()?;
-        let end = input.parse::<LitInt>()?.base10_parse::<u16>()?;
+        let mut range_adjustment = 0;
+        if input.peek(Token![=]) {
+            range_adjustment = 1;
+            input.parse::<Token![=]>()?;
+        }
+        let end = input.parse::<LitInt>()?.base10_parse::<u16>()? + range_adjustment;
         braced!(content in input);
         let content = content.parse::<TokenStream2>()?;
         Ok(Seq {
             ident,
-            start,
-            end,
+            range: start..end,
             content: content.into(),
         })
     }
@@ -42,12 +43,83 @@ impl Parse for Seq {
 
 impl Seq {
     fn output(&self) -> Result<TokenStream2> {
-        let mut out = TokenStream2::new();
-        for n in self.start..self.end {
-            let content = self.interpolate(n, self.content.clone())?;
+        if self.detect_repeat_region(self.content.clone()) {
+            // If present, just repeat the designated regions
+            self.repeat_regions(self.content.clone())
+        } else {
+            // Otherwise, by default, interpolate the entire content
+            self.repeat_stream(self.content.clone())
+        }
+    }
+
+    fn detect_repeat_region(&self, ts: TokenStream2) -> bool {
+        let mut stream = ts.into_iter().peekable();
+        loop {
+            match (stream.next(), stream.peek()) {
+                (Some(TokenTree::Punct(p)), Some(TokenTree::Group(g)))
+                    if p.as_char() == '#' && g.delimiter() == Delimiter::Parenthesis =>
+                {
+                    return true;
+                }
+                (Some(TokenTree::Group(g)), _) => {
+                    if self.detect_repeat_region(g.stream()) {
+                        return true;
+                    }
+                }
+                (_, None) => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn repeat_regions(&self, ts: TokenStream2) -> Result<TokenStream2> {
+        let mut out = vec![];
+        let mut stream = ts.into_iter().peekable();
+        loop {
+            match (stream.next(), stream.peek()) {
+                (Some(TokenTree::Punct(p)), Some(TokenTree::Group(g)))
+                    if p.as_char() == '#' && g.delimiter() == Delimiter::Parenthesis =>
+                {
+                    out.extend(self.repeat_stream(g.stream())?);
+                    // skip the '#' and the group we just processed
+                    stream.next();
+                    // skip the expected '*', or error
+                    match stream.next() {
+                        Some(TokenTree::Punct(p)) if p.as_char() == '*' => {}
+                        unexpected => {
+                            return Err(Self::unexpected_err(
+                                unexpected,
+                                "Expected * after #(...)",
+                            ));
+                        }
+                    }
+                }
+                (Some(TokenTree::Group(g)), _) => {
+                    let inner_ts = self.repeat_regions(g.stream())?;
+                    let mut new_g = Group::new(g.delimiter(), inner_ts);
+                    new_g.set_span(g.span());
+                    out.push(TokenTree::Group(new_g));
+                }
+                (Some(tt), _) => {
+                    out.push(tt);
+                }
+                (None, _) => {
+                    break;
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    fn repeat_stream(&self, ts: TokenStream2) -> Result<TokenStream2> {
+        let mut out = vec![];
+        for n in self.range.clone() {
+            let content = self.interpolate(n, ts.clone())?;
             out.extend(content);
         }
-        Ok(out)
+        Ok(out.into_iter().collect())
     }
 
     fn interpolate(&self, n: u16, ts: TokenStream2) -> Result<TokenStream2> {
